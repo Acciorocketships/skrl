@@ -935,6 +935,92 @@ class RobosuiteWrapper(Wrapper):
         self._env.close()
 
 
+
+class VMASWrapper(Wrapper):
+    def __init__(self, env: Any) -> None:
+        """VMAS environment wrapper
+
+        Moves tuple
+
+        :param env: The environment to wrap
+        :type env: Any supported VMAS environment
+        """
+        super().__init__(env)
+
+        self.orig_obs_space = env.observation_space
+        self.obs_space = self.merge_space(env.observation_space)
+        self.orig_act_space = env.action_space
+        self.act_space = self.merge_space(env.action_space)
+        self.act_split_sizes = [subspace.shape[0] for subspace in self.orig_act_space]
+
+    def merge_space(self, space):
+        assert isinstance(space, gym.spaces.Tuple)
+        continuous = isinstance(space[0], gym.spaces.Box)
+        if continuous:
+            low = []
+            high = []
+            shape = (len(space),) + space[0].shape
+            dtype = space[0].dtype
+            for subspace in space:
+                assert isinstance(subspace, gym.spaces.Box)
+                low.append(subspace.low)
+                high.append(subspace.high)
+            low = np.stack(low, axis=0)
+            high = np.stack(high, axis=0)
+            return gym.spaces.Box(low=low, high=high, shape=shape, dtype=dtype)
+        else:
+            sizes = []
+            for subspace in space:
+                if isinstance(subspace, gym.spaces.Discrete):
+                    sizes.append([subspace.n])
+                elif isinstance(subspace, gym.spaces.MultiDiscrete):
+                    sizes.append(subspace.nvec.tolist())
+                else:
+                    raise ValueError("Space must be a tuple of either Box or Discrete/MultiDiscrete")
+                sizes = np.array(sizes)
+            return gym.spaces.MultiDiscrete(sizes)
+
+    @property
+    def state_space(self) -> gym.Space:
+        return self.observation_space()
+
+    @property
+    def observation_space(self) -> gym.Space:
+        return self.obs_space
+
+    @property
+    def action_space(self) -> gym.Space:
+        return self.act_space
+
+    def _observation_to_tensor(self, observation: Any, space: Optional[gym.Space] = None) -> torch.Tensor:
+        return torch.stack(observation, dim=1).to(self.device)
+
+    def _tensor_to_action(self, actions: torch.Tensor) -> Any:
+        action_list = actions.to(self.device).unbind(dim=1)
+        return action_list
+
+    def step(self, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Any]:
+        observation, reward, terminated, info = self._env.step(self._tensor_to_action(actions))
+        # convert response to torch
+        observation = self._observation_to_tensor(observation)
+        reward = self._observation_to_tensor(reward).unsqueeze(-1)
+        terminated = terminated.unsqueeze(-1)
+        truncated = torch.zeros_like(terminated, dtype=torch.bool)
+
+        return observation, reward, terminated, truncated, info
+
+    def reset(self) -> Tuple[torch.Tensor, Any]:
+        observation, info = self._env.reset(return_info=True)
+        observation = self._observation_to_tensor(observation)
+        return observation, info
+
+    def render(self, *args, **kwargs) -> None:
+        return self._env.render(*args, **kwargs)
+
+    def close(self) -> None:
+        self._env.close()
+
+
 def wrap_env(env: Any, wrapper: str = "auto", verbose: bool = True) -> Wrapper:
     """Wrap an environment to use a common interface
 
@@ -1021,6 +1107,10 @@ def wrap_env(env: Any, wrapper: str = "auto", verbose: bool = True) -> Wrapper:
             if verbose:
                 logger.info("Environment wrapper: Isaac Gym (preview 2)")
             return IsaacGymPreview2Wrapper(env)
+        elif "<class 'vmas.simulator.core.TorchVectorizedObject'>":
+            if verbose:
+                logger.info("Environment wrapper: VMAS")
+            return VMASWrapper(env)
         if verbose:
             logger.info("Environment wrapper: Isaac Gym (preview 3/4)")
         return IsaacGymPreview3Wrapper(env)  # preview 4 is the same as 3
@@ -1060,5 +1150,9 @@ def wrap_env(env: Any, wrapper: str = "auto", verbose: bool = True) -> Wrapper:
         if verbose:
             logger.info("Environment wrapper: Isaac Orbit")
         return IsaacOrbitWrapper(env)
+    elif wrapper == "vmas":
+        if verbose:
+            logger.info("Environment wrapper: VMAS")
+        return VMASWrapper(env)
     else:
         raise ValueError("Unknown {} wrapper type".format(wrapper))
