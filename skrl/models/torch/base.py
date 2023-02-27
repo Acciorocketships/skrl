@@ -124,6 +124,8 @@ class Model(torch.nn.Module):
                 size = np.prod(space.shape)
             elif issubclass(type(space), gym.spaces.Dict):
                 size = sum([self._get_space_size(space.spaces[key], number_of_elements) for key in space.spaces])
+            elif issubclass(type(space), gym.spaces.Tuple):
+                size = sum([self._get_space_size(subspace, number_of_elements) for subspace in space.spaces])
         elif issubclass(type(space), gymnasium.Space):
             if issubclass(type(space), gymnasium.spaces.Discrete):
                 if number_of_elements:
@@ -134,6 +136,8 @@ class Model(torch.nn.Module):
                 size = np.prod(space.shape)
             elif issubclass(type(space), gymnasium.spaces.Dict):
                 size = sum([self._get_space_size(space.spaces[key], number_of_elements) for key in space.spaces])
+            elif issubclass(type(space), gymnasium.spaces.Tuple):
+                size = sum([self._get_space_size(subspace, number_of_elements) for subspace in space.spaces])
         if size is None:
             raise ValueError("Space type {} not supported".format(type(space)))
         return int(size)
@@ -186,6 +190,13 @@ class Model(torch.nn.Module):
                     output[k] = self.tensor_to_space(tensor[:, start:end], space[k], end)
                     start = end
                 return output
+            elif issubclass(type(space), gym.spaces.Tuple):
+                output = []
+                for subspace in space:
+                    end = start + self._get_space_size(subspace, number_of_elements=False)
+                    output.append(self.tensor_to_space(tensor[:, start:end], space[k], end))
+                    start = end
+                return tuple(output)
         else:
             if issubclass(type(space), gymnasium.spaces.Discrete):
                 return tensor
@@ -198,6 +209,13 @@ class Model(torch.nn.Module):
                     output[k] = self.tensor_to_space(tensor[:, start:end], space[k], end)
                     start = end
                 return output
+            elif issubclass(type(space), gym.spaces.Tuple):
+                output = []
+                for subspace in space:
+                    end = start + self._get_space_size(subspace, number_of_elements=False)
+                    output.append(self.tensor_to_space(tensor[:, start:end], space[k], end))
+                    start = end
+                return tuple(output)
         raise ValueError("Space type {} not supported".format(type(space)))
 
     def random_act(self,
