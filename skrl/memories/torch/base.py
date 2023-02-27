@@ -260,19 +260,19 @@ class Memory:
         dim, shape = tmp.ndim, tmp.shape
 
         # multi environment (number of environments equals num_envs)
-        if dim == 2 and shape[0] == self.num_envs:
+        if dim >= 2 and shape[0] == self.num_envs:
             for name, tensor in tensors.items():
                 if name in self.tensors:
                     self.tensors[name][self.memory_index].copy_(tensor)
             self.memory_index += 1
         # multi environment (number of environments less than num_envs)
-        elif dim == 2 and shape[0] < self.num_envs:
+        elif dim >= 2 and shape[0] < self.num_envs:
             for name, tensor in tensors.items():
                 if name in self.tensors:
                     self.tensors[name][self.memory_index, self.env_index:self.env_index + tensor.shape[0]].copy_(tensor)
             self.env_index += tensor.shape[0]
         # single environment - multi sample (number of environments greater than num_envs (num_envs = 1))
-        elif dim == 2 and self.num_envs == 1:
+        elif dim >= 2 and self.num_envs == 1:
             for name, tensor in tensors.items():
                 if name in self.tensors:
                     num_samples = min(shape[0], self.memory_size - self.memory_index)
