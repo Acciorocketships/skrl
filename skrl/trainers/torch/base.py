@@ -1,11 +1,13 @@
 from typing import Union, List, Optional
 
+import numpy as np
 import tqdm
 
 import torch
 
 from skrl.envs.torch import Wrapper
 from skrl.agents.torch import Agent
+import wandb
 
 
 def generate_equally_spaced_scopes(num_envs: int, num_agents: int) -> List[int]:
@@ -153,6 +155,10 @@ class Trainer:
 
         # reset env
         states, infos = self.env.reset()
+        t = 0
+        k = 0
+
+        frames = []
 
         for timestep in tqdm.tqdm(range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar):
 
@@ -165,10 +171,16 @@ class Trainer:
 
             # step the environments
             next_states, rewards, terminated, truncated, infos = self.env.step(actions)
+            t += 1
+
+            if t >= self.cfg.get("max_episode_length", float("inf")):
+                truncated = torch.ones_like(truncated, dtype=torch.bool, device=truncated.device)
 
             # render scene
             if not self.headless:
-                self.env.render()
+                frame = self.env.render(**self.cfg.get("render_kwargs", {}))
+                if self.cfg.get("render_gif", False) and k % self.cfg.get("render_freq", 1) == 0:
+                    frames.append(frame)
 
             # record the environments' transitions
             with torch.no_grad():
@@ -189,6 +201,13 @@ class Trainer:
             with torch.no_grad():
                 if terminated.any() or truncated.any():
                     states, infos = self.env.reset()
+                    t = 0
+                    k += 1
+                    if len(frames) > 0 and isinstance(frames[0], np.ndarray):
+                        vid = np.transpose(frames, (0, 3, 1, 2))
+                        wandb_vid = wandb.Video(vid, fps=self.cfg.get("render_fps", 10), format="mp4")
+                        self.agents.track_data("Visualisation", wandb_vid)
+                    frames = []
                 else:
                     states.copy_(next_states)
 
@@ -209,6 +228,10 @@ class Trainer:
 
         # reset env
         states, infos = self.env.reset()
+        t = 0
+        k = 0
+
+        frames = []
 
         for timestep in tqdm.tqdm(range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar):
 
@@ -218,10 +241,16 @@ class Trainer:
 
             # step the environments
             next_states, rewards, terminated, truncated, infos = self.env.step(actions)
+            t += 1
+
+            if t >= self.cfg.get("max_episode_length", float("inf")):
+                truncated = torch.ones_like(truncated, dtype=torch.bool, device=truncated.device)
 
             # render scene
             if not self.headless:
-                self.env.render()
+                frame = self.env.render(**self.cfg.get("render_kwargs", {}))
+                if self.cfg.get("render_gif", False) and k % self.cfg.get("render_freq", 1) == 0:
+                    frames.append(frame)
 
             with torch.no_grad():
                 # write data to TensorBoard
@@ -239,6 +268,13 @@ class Trainer:
                 # reset environments
                 if terminated.any() or truncated.any():
                     states, infos = self.env.reset()
+                    t = 0
+                    k += 1
+                    if len(frames) > 0 and isinstance(frames[0], np.ndarray):
+                        vid = np.transpose(frames, (0, 3, 1, 2))
+                        wandb_vid = wandb.Video(vid, fps=self.cfg.get("render_fps", 10), format="mp4")
+                        super(type(self.agents), self.agents).track_data("Visualisation", wandb_vid)
+                    frames = []
                 else:
                     states.copy_(next_states)
 

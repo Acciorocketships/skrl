@@ -14,6 +14,8 @@ from skrl import logger
 from skrl.memories.torch import Memory
 from skrl.models.torch import Model
 
+import wandb
+
 
 class Agent:
     def __init__(self,
@@ -144,17 +146,10 @@ class Agent:
             config={**self.cfg, **trainer_cfg, **models_cfg}
             # set default values
             wandb_kwargs = copy.deepcopy(self.cfg.get("experiment", {}).get("wandb_kwargs", {}))
-            wandb_kwargs.setdefault("name", os.path.split(self.experiment_dir)[-1])
-            wandb_kwargs.setdefault("sync_tensorboard", True)
             wandb_kwargs.setdefault("config", {})
             wandb_kwargs["config"].update(config)
             # init Weights & Biases
-            import wandb
             wandb.init(**wandb_kwargs)
-
-        # main entry to log data for consumption and visualization by TensorBoard
-        if self.write_interval > 0:
-            self.writer = SummaryWriter(log_dir=self.experiment_dir)
 
         if self.checkpoint_interval > 0:
             os.makedirs(os.path.join(self.experiment_dir, "checkpoints"), exist_ok=True)
@@ -179,13 +174,14 @@ class Agent:
         :param timesteps: Number of timesteps
         :type timesteps: int
         """
-        for k, v in self.tracking_data.items():
-            if k.endswith("(min)"):
-                self.writer.add_scalar(k, np.min(v), timestep)
-            elif k.endswith("(max)"):
-                self.writer.add_scalar(k, np.max(v), timestep)
-            else:
-                self.writer.add_scalar(k, np.mean(v), timestep)
+        for key, val in self.tracking_data.items():
+            if "(min)" in key:
+                self.tracking_data[key] = np.min(val)
+            if "(max)" in key:
+                self.tracking_data[key] = np.max(val)
+            if "(mean)" in key:
+                self.tracking_data[key] = np.mean(val)
+        wandb.log(self.tracking_data)
         # reset data containers for next iteration
         self._track_rewards.clear()
         self._track_timesteps.clear()
