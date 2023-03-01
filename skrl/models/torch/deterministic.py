@@ -95,6 +95,9 @@ class DeterministicMixin:
             if self._backward_compatibility:
                 actions = torch.max(torch.min(actions, self.clip_actions_max), self.clip_actions_min)
             else:
-                actions = torch.clamp(actions, min=self.clip_actions_min, max=self.clip_actions_max)
+                if actions.shape[-self.clip_actions_min.dim():] == self.clip_actions_min.shape:
+                    actions = torch.clamp(actions, min=self.clip_actions_min, max=self.clip_actions_max)
+                elif actions.shape[1:] == self.clip_actions_min.shape[1:]:
+                    actions = torch.clamp(actions, min=self.clip_actions_min[0], max=self.clip_actions_max[0])
 
         return actions, None, outputs
