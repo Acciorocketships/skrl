@@ -174,13 +174,22 @@ class Agent:
         :param timesteps: Number of timesteps
         :type timesteps: int
         """
+        if not self.cfg["experiment"]["wandb"]:
+            return
         for key, val in self.tracking_data.items():
             if "(min)" in key:
                 self.tracking_data[key] = np.min(val)
             if "(max)" in key:
                 self.tracking_data[key] = np.max(val)
-            if "(mean)" in key:
-                self.tracking_data[key] = np.mean(val)
+            else:
+                if len(val) == 0:
+                    continue
+                if isinstance(val[0], np.ndarray):
+                    self.tracking_data[key] = np.array(val).tolist()
+                elif isinstance(val[0], torch.Tensor):
+                    self.tracking_data[key] = torch.cat(val).detach().cpu().tolist()
+                elif isinstance(val[0], float) or isinstance(val[0], int):
+                    self.tracking_data[key] = np.mean(val)
         wandb.log(self.tracking_data)
         # reset data containers for next iteration
         self._track_rewards.clear()
