@@ -155,7 +155,6 @@ class Trainer:
 
         # reset env
         states, infos = self.env.reset()
-        t = 0
         k = 0
 
         frames = []
@@ -171,16 +170,22 @@ class Trainer:
 
             # step the environments
             next_states, rewards, terminated, truncated, infos = self.env.step(actions)
-            t += 1
-
-            if t >= self.cfg.get("max_episode_length", float("inf")):
-                truncated = torch.ones_like(truncated, dtype=torch.bool, device=truncated.device)
 
             # render scene
             if not self.headless:
                 frame = self.env.render(**self.cfg.get("render_kwargs", {}))
-                if self.cfg.get("render_gif", False) and k % self.cfg.get("render_freq", 1) == 0:
+                if self.cfg.get("render_gif", False) and k % self.cfg.get("render_freq", 10) == 0:
                     frames.append(frame)
+
+            # save gif
+            if terminated.squeeze()[0]:
+                if self.cfg.get("render_gif", False) and k % self.cfg.get("render_freq", 10) == 0:
+                    vid = np.transpose(frames, (0, 3, 1, 2))
+                    wandb_vid = wandb.Video(vid, fps=self.cfg.get("render_fps", 10), format="mp4")
+                    self.agents.track_data("Visualisation", wandb_vid)
+                    frames = []
+                    k = 0
+                k += 1
 
             # record the environments' transitions
             with torch.no_grad():
@@ -199,15 +204,9 @@ class Trainer:
 
             # reset environments
             with torch.no_grad():
-                if terminated.any() or truncated.any():
-                    states, infos = self.env.reset()
-                    t = 0
-                    k += 1
-                    if len(frames) > 0 and isinstance(frames[0], np.ndarray):
-                        vid = np.transpose(frames, (0, 3, 1, 2))
-                        wandb_vid = wandb.Video(vid, fps=self.cfg.get("render_fps", 10), format="mp4")
-                        self.agents.track_data("Visualisation", wandb_vid)
-                    frames = []
+                mask = terminated | truncated
+                if mask.any():
+                    states, infos = self.env.reset(mask)
                 else:
                     states.copy_(next_states)
 
@@ -228,7 +227,6 @@ class Trainer:
 
         # reset env
         states, infos = self.env.reset()
-        t = 0
         k = 0
 
         frames = []
@@ -243,14 +241,21 @@ class Trainer:
             next_states, rewards, terminated, truncated, infos = self.env.step(actions)
             t += 1
 
-            if t >= self.cfg.get("max_episode_length", float("inf")):
-                truncated = torch.ones_like(truncated, dtype=torch.bool, device=truncated.device)
-
             # render scene
             if not self.headless:
                 frame = self.env.render(**self.cfg.get("render_kwargs", {}))
-                if self.cfg.get("render_gif", False) and k % self.cfg.get("render_freq", 1) == 0:
+                if self.cfg.get("render_gif", False) and k % self.cfg.get("render_freq", 10) == 0:
                     frames.append(frame)
+
+            # save gif
+            if terminated.squeeze()[0]:
+                if self.cfg.get("render_gif", False) and k % self.cfg.get("render_freq", 10) == 0:
+                    vid = np.transpose(frames, (0, 3, 1, 2))
+                    wandb_vid = wandb.Video(vid, fps=self.cfg.get("render_fps", 10), format="mp4")
+                    super(type(self.agents), self.agents).track_data("Visualisation", wandb_vid)
+                    frames = []
+                    k = 0
+                k += 1
 
             with torch.no_grad():
                 # write data to TensorBoard
@@ -266,17 +271,12 @@ class Trainer:
                 super(type(self.agents), self.agents).post_interaction(timestep=timestep, timesteps=self.timesteps)
 
                 # reset environments
-                if terminated.any() or truncated.any():
-                    states, infos = self.env.reset()
-                    t = 0
-                    k += 1
-                    if len(frames) > 0 and isinstance(frames[0], np.ndarray):
-                        vid = np.transpose(frames, (0, 3, 1, 2))
-                        wandb_vid = wandb.Video(vid, fps=self.cfg.get("render_fps", 10), format="mp4")
-                        super(type(self.agents), self.agents).track_data("Visualisation", wandb_vid)
-                    frames = []
-                else:
-                    states.copy_(next_states)
+                with torch.no_grad():
+                    mask = terminated | truncated
+                    if mask.any():
+                        states, infos = self.env.reset(mask)
+                    else:
+                        states.copy_(next_states)
 
         # close the environment
         self.env.close()

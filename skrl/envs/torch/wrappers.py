@@ -44,7 +44,7 @@ class Wrapper(object):
         raise AttributeError("Wrapped environment ({}) does not have attribute '{}'" \
             .format(self._env.__class__.__name__, key))
 
-    def reset(self) -> Tuple[torch.Tensor, Any]:
+    def reset(self, *args, **kwargs) -> Tuple[torch.Tensor, Any]:
         """Reset the environment
 
         :raises NotImplementedError: Not implemented
@@ -136,7 +136,7 @@ class IsaacGymPreview2Wrapper(Wrapper):
         truncated = torch.zeros_like(terminated)
         return self._obs_buf, reward.view(-1, 1), terminated.view(-1, 1), truncated.view(-1, 1), info
 
-    def reset(self) -> Tuple[torch.Tensor, Any]:
+    def reset(self, *args, **kwargs) -> Tuple[torch.Tensor, Any]:
         """Reset the environment
 
         :return: Observation, info
@@ -183,7 +183,7 @@ class IsaacGymPreview3Wrapper(Wrapper):
         truncated = torch.zeros_like(terminated)
         return self._obs_dict["obs"], reward.view(-1, 1), terminated.view(-1, 1), truncated.view(-1, 1), info
 
-    def reset(self) -> Tuple[torch.Tensor, Any]:
+    def reset(self, *args, **kwargs) -> Tuple[torch.Tensor, Any]:
         """Reset the environment
 
         :return: Observation, info
@@ -240,7 +240,7 @@ class OmniverseIsaacGymWrapper(Wrapper):
         truncated = torch.zeros_like(terminated)
         return self._obs_dict["obs"], reward.view(-1, 1), terminated.view(-1, 1), truncated.view(-1, 1), info
 
-    def reset(self) -> Tuple[torch.Tensor, Any]:
+    def reset(self, *args, **kwargs) -> Tuple[torch.Tensor, Any]:
         """Reset the environment
 
         :return: Observation, info
@@ -287,7 +287,7 @@ class IsaacOrbitWrapper(Wrapper):
         truncated = torch.zeros_like(terminated)
         return self._obs_dict["policy"], reward.view(-1, 1), terminated.view(-1, 1), truncated.view(-1, 1), info
 
-    def reset(self) -> Tuple[torch.Tensor, Any]:
+    def reset(self, *args, **kwargs) -> Tuple[torch.Tensor, Any]:
         """Reset the environment
 
         :return: Observation, info
@@ -453,7 +453,7 @@ class GymWrapper(Wrapper):
 
         return observation, reward, terminated, truncated, info
 
-    def reset(self) -> Tuple[torch.Tensor, Any]:
+    def reset(self, *args, **kwargs) -> Tuple[torch.Tensor, Any]:
         """Reset the environment
 
         :return: Observation, info
@@ -611,7 +611,7 @@ class GymnasiumWrapper(Wrapper):
 
         return observation, reward, terminated, truncated, info
 
-    def reset(self) -> Tuple[torch.Tensor, Any]:
+    def reset(self, *args, **kwargs) -> Tuple[torch.Tensor, Any]:
         """Reset the environment
 
         :return: Observation, info
@@ -769,7 +769,7 @@ class DeepMindWrapper(Wrapper):
                torch.tensor(truncated, device=self.device, dtype=torch.bool).view(self.num_envs, -1), \
                info
 
-    def reset(self) -> Tuple[torch.Tensor, Any]:
+    def reset(self, *args, **kwargs) -> Tuple[torch.Tensor, Any]:
         """Reset the environment
 
         :return: The state of the environment
@@ -915,7 +915,7 @@ class RobosuiteWrapper(Wrapper):
                torch.tensor(truncated, device=self.device, dtype=torch.bool).view(self.num_envs, -1), \
                info
 
-    def reset(self) -> Tuple[torch.Tensor, Any]:
+    def reset(self, *args, **kwargs) -> Tuple[torch.Tensor, Any]:
         """Reset the environment
 
         :return: The state of the environment
@@ -947,6 +947,7 @@ class VMASWrapper(Wrapper):
         """
         super().__init__(env)
 
+        self.n_agents = env.n_agents
         self.orig_obs_space = env.observation_space
         self.obs_space = self.merge_space(env.observation_space)
         self.orig_act_space = env.action_space
@@ -1009,10 +1010,21 @@ class VMASWrapper(Wrapper):
 
         return observation, reward, terminated, truncated, info
 
-    def reset(self) -> Tuple[torch.Tensor, Any]:
-        observation, info = self._env.reset(return_info=True)
-        observation = self._observation_to_tensor(observation)
-        return observation, info
+    def reset(self, mask=None, *args, **kwargs) -> Tuple[torch.Tensor, Any]:
+        if mask is None or mask.all():
+            obs, info = self._env.reset(return_info=True)
+            obs = self._observation_to_tensor(obs)
+            return obs, info
+        elif mask.any():
+            for idx in torch.where(mask)[0]:
+                self._env.reset_at(idx)
+            obs = []
+            infos = []
+            for agent in self.agents:
+                obs.append(self.scenario.observation(agent))
+                infos.append(self.scenario.info(agent))
+            obs = self._observation_to_tensor(obs)
+            return obs, infos
 
     def render(self, *args, **kwargs) -> None:
         return self._env.render(*args, **kwargs)
