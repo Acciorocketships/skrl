@@ -51,17 +51,17 @@ class DeterministicMixin:
               )
             )
         """
-        if not hasattr(self, "_d_clip_actions"):
-            self._d_clip_actions = {}
-        self._d_clip_actions[role] = clip_actions and (issubclass(type(self.action_space), gym.Space) or \
-            issubclass(type(self.action_space), gymnasium.Space))
-
-        if self._d_clip_actions[role]:
-            self.clip_actions_min = torch.tensor(self.action_space.low, device=self.device, dtype=torch.float32)
-            self.clip_actions_max = torch.tensor(self.action_space.high, device=self.device, dtype=torch.float32)
-
-            # backward compatibility: torch < 1.9 clamp method does not support tensors
-            self._backward_compatibility = tuple(map(int, (torch.__version__.split(".")[:2]))) < (1, 9)
+        # if not hasattr(self, "_d_clip_actions"):
+        #     self._d_clip_actions = {}
+        # self._d_clip_actions[role] = clip_actions and (issubclass(type(self.action_space), gym.Space) or \
+        #     issubclass(type(self.action_space), gymnasium.Space))
+        #
+        # if self._d_clip_actions[role]:
+        #     self.clip_actions_min = torch.tensor(self.action_space.low, device=self.device, dtype=torch.float32)
+        #     self.clip_actions_max = torch.tensor(self.action_space.high, device=self.device, dtype=torch.float32)
+        #
+        #     # backward compatibility: torch < 1.9 clamp method does not support tensors
+        #     self._backward_compatibility = tuple(map(int, (torch.__version__.split(".")[:2]))) < (1, 9)
 
     def act(self,
             inputs: Mapping[str, Union[torch.Tensor, Any]],
@@ -89,15 +89,4 @@ class DeterministicMixin:
         """
         # map from observations/states to actions
         actions, outputs = self.compute(inputs, role)
-
-        # clip actions
-        if self._d_clip_actions[role] if role in self._d_clip_actions else self._d_clip_actions[""]:
-            if self._backward_compatibility:
-                actions = torch.max(torch.min(actions, self.clip_actions_max), self.clip_actions_min)
-            else:
-                if actions.shape[-self.clip_actions_min.dim():] == self.clip_actions_min.shape:
-                    actions = torch.clamp(actions, min=self.clip_actions_min, max=self.clip_actions_max)
-                elif actions.shape[1:] == self.clip_actions_min.shape[1:]:
-                    actions = torch.clamp(actions, min=self.clip_actions_min[0], max=self.clip_actions_max[0])
-
         return actions, None, outputs

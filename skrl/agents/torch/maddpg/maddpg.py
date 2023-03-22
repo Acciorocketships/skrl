@@ -33,6 +33,8 @@ MADDPG_DEFAULT_CONFIG = {
 
     "grad_norm_clip": 0,            # clipping coefficient for the norm of the gradients
 
+    "clamp_magnitude": True,        # clamp the magnitude of the action instead of each dimension
+
     "exploration": {
         "noise": None,              # exploration noise
         "initial_scale": 1.0,       # initial scale for the noise
@@ -62,7 +64,6 @@ class MADDPG(Agent):
                  memory: Optional[Union[Memory, Tuple[Memory]]] = None,
                  observation_space: Optional[Union[int, Tuple[int], gym.Space, gymnasium.Space]] = None,
                  action_space: Optional[Union[int, Tuple[int], gym.Space, gymnasium.Space]] = None,
-                 num_agents: Optional[int] = 1,
                  device: Optional[Union[str, torch.device]] = None,
                  cfg: Optional[dict] = None) -> None:
         """Deep Deterministic Policy Gradient (MADDPG)
@@ -96,7 +97,7 @@ class MADDPG(Agent):
                          device=device,
                          cfg=_cfg)
 
-        self.num_agents = num_agents
+        self.num_agents = observation_space.shape[0] if len(observation_space.shape)>=2 else 1
 
         # models
         self.policy = self.models.get("policy", None)
@@ -136,6 +137,7 @@ class MADDPG(Agent):
         self._learning_starts = self.cfg["learning_starts"]
 
         self._grad_norm_clip = self.cfg["grad_norm_clip"]
+        self._clamp_magnitude = self.cfg["clamp_magnitude"]
 
         self._exploration_noise = self.cfg["exploration"]["noise"]
         self._exploration_initial_scale = self.cfg["exploration"]["initial_scale"]
@@ -247,10 +249,7 @@ class MADDPG(Agent):
 
                 # modify actions
                 actions.add_(noises)
-                if self._backward_compatibility:
-                    actions = torch.max(torch.min(actions, self.clip_actions_max), self.clip_actions_min)
-                else:
-                    actions.clamp_(min=self.clip_actions_min, max=self.clip_actions_max)
+                actions = self.transform_actions(actions)
 
                 # record noises
                 self.track_data("Exploration / Exploration noise (max)", torch.max(noises).item())
@@ -378,11 +377,13 @@ class MADDPG(Agent):
             with torch.no_grad():
                 next_actions, _, _ = self.target_policy.act({"states": sampled_next_states, **rnn_policy}, role="target_policy")
 
-                target_q_values, _, _ = self.target_critic.act({"states": sampled_next_states, "taken_actions": next_actions, **rnn_policy}, role="target_critic")
+                target_q_values, _, outputs = self.target_critic.act({"states": sampled_next_states, "taken_actions": next_actions, **rnn_policy}, role="target_critic")
+                target_q_values = outputs.get("q_values", target_q_values)
                 target_values = sampled_rewards + self._discount_factor * sampled_dones.logical_not().unsqueeze(1) * target_q_values
 
             # compute critic loss
-            critic_values, _, _ = self.critic.act({"states": sampled_states, "taken_actions": sampled_actions, **rnn_policy}, role="critic")
+            critic_values, _, outputs = self.critic.act({"states": sampled_states, "taken_actions": sampled_actions, **rnn_policy}, role="critic")
+            critic_values = outputs.get("q_values", critic_values)
             critic_loss = F.mse_loss(critic_values, target_values)
 
             # optimization step (critic)
@@ -394,6 +395,7 @@ class MADDPG(Agent):
 
             # compute policy (actor) loss
             actions, _, _ = self.policy.act({"states": sampled_states, **rnn_policy}, role="policy")
+            actions = self.transform_actions(actions)
             critic_values, _, _ = self.critic.act({"states": sampled_states, "taken_actions": actions, **rnn_policy}, role="critic")
 
             policy_loss = -critic_values.mean()
@@ -429,3 +431,6 @@ class MADDPG(Agent):
             if self._learning_rate_scheduler:
                 self.track_data("Learning / Policy learning rate", self.policy_scheduler.get_last_lr()[0])
                 self.track_data("Learning / Critic learning rate", self.critic_scheduler.get_last_lr()[0])
+
+            self.track_data("Actions x", actions[0, :, 0].detach().cpu())
+            self.track_data("Actions y", actions[0, :, 1].detach().cpu())

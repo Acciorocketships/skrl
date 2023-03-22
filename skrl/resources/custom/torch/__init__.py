@@ -1,0 +1,1 @@
+from skrl.resources.custom.torch.curiosity import VarianceCuriosity

@@ -185,9 +185,9 @@ class Agent:
                 if len(val) == 0:
                     continue
                 if isinstance(val[0], np.ndarray):
-                    self.tracking_data[key] = np.array(val).tolist()
+                    self.tracking_data[key] = np.array(val).reshape(-1).tolist()
                 elif isinstance(val[0], torch.Tensor):
-                    self.tracking_data[key] = torch.cat(val).detach().cpu().tolist()
+                    self.tracking_data[key] = torch.cat(val).view(-1).detach().cpu().tolist()
                 elif isinstance(val[0], float) or isinstance(val[0], int):
                     self.tracking_data[key] = np.mean(val)
         wandb.log(self.tracking_data)
@@ -666,3 +666,25 @@ class Agent:
         :raises NotImplementedError: The method is not implemented by the inheriting classes
         """
         raise NotImplementedError
+
+    def transform_actions(self, actions):
+        self.clip_actions_min = torch.tensor(self.action_space.low, device=self.device)
+        self.clip_actions_max = torch.tensor(self.action_space.high, device=self.device)
+        if self._clamp_magnitude:
+            clip_actions_min = torch.amin(self.clip_actions_min, dim=-1)
+            clip_actions_max = torch.amax(self.clip_actions_max, dim=-1)
+            clip_actions_mag = (clip_actions_max - clip_actions_min) / 2
+            clip_actions_mean = (self.clip_actions_min + self.clip_actions_max) / 2
+            # uncomment if the inputs should already be shifted and scaled to the proper range
+            # actions = (actions - clip_actions_mean) / clip_actions_mag
+            actions_mag = torch.norm(actions, dim=-1)
+            actions_dir = actions / actions_mag[..., None]
+            actions_mag_clamped = torch.tanh(actions_mag)
+            actions = (actions_dir * (actions_mag_clamped * clip_actions_mag)[..., None]) + clip_actions_mean[None, ...]
+        else:
+            clip_actions_range = self.clip_actions_max - self.clip_actions_min
+            # uncomment if the inputs should already be shifted and scaled to the proper range
+            # actions = (actions - self.clip_actions_min) * (2 / clip_actions_range)
+            actions_clamped = torch.tanh(actions)
+            actions = actions_clamped * (clip_actions_range / 2) + (self.clip_actions_min + 1)
+        return actions

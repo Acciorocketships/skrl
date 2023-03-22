@@ -3,7 +3,6 @@ from typing import Union, Tuple, Dict, Any, Optional
 import gym, gymnasium
 import copy
 import itertools
-import numpy as np
 
 import torch
 import torch.nn as nn
@@ -15,7 +14,7 @@ from skrl.models.torch import Model
 from skrl.agents.torch import Agent
 
 
-MASAC_DEFAULT_CONFIG = {
+MATD3_DEFAULT_CONFIG = {
     "gradient_steps": 1,            # gradient steps
     "batch_size": 64,               # training batch size
 
@@ -34,16 +33,25 @@ MASAC_DEFAULT_CONFIG = {
     "learning_starts": 0,           # learning starts after this many steps
 
     "grad_norm_clip": 0,            # clipping coefficient for the norm of the gradients
+    "clamp_magnitude": True,  # clamp the magnitude of the action instead of each dimension
 
-    "learn_entropy": True,          # learn entropy
-    "entropy_learning_rate": 1e-3,  # entropy learning rate
-    "initial_entropy_value": 0.2,   # initial entropy value
-    "target_entropy": None,         # target entropy
+    "curiosity": None,
+
+    "exploration": {
+        "noise": None,              # exploration noise
+        "initial_scale": 1.0,       # initial scale for the noise
+        "final_scale": 1e-3,        # final scale for the noise
+        "timesteps": None,          # timesteps for the noise decay
+    },
+
+    "policy_delay": 2,                      # policy delay update with respect to critic update
+    "smooth_regularization_noise": None,    # smooth noise for regularization
+    "smooth_regularization_clip": 0.5,      # clip for smooth regularization
 
     "rewards_shaper": None,         # rewards shaping function: Callable(reward, timestep, timesteps) -> reward
 
     "experiment": {
-        "base_directory": "",       # base directory for the experiment
+        "directory": "",            # experiment's parent directory
         "experiment_name": "",      # experiment name
         "write_interval": 250,      # TensorBoard writing interval (timesteps)
 
@@ -56,7 +64,7 @@ MASAC_DEFAULT_CONFIG = {
 }
 
 
-class MASAC(Agent):
+class MATD3(Agent):
     def __init__(self,
                  models: Dict[str, Model],
                  memory: Optional[Union[Memory, Tuple[Memory]]] = None,
@@ -64,9 +72,9 @@ class MASAC(Agent):
                  action_space: Optional[Union[int, Tuple[int], gym.Space, gymnasium.Space]] = None,
                  device: Optional[Union[str, torch.device]] = None,
                  cfg: Optional[dict] = None) -> None:
-        """Multi-Agent Soft Actor-Critic (MASAC)
+        """Twin Delayed DDPG (MATD3)
 
-        https://arxiv.org/abs/1801.01290
+        https://arxiv.org/abs/1802.09477
 
         :param models: Models used by the agent
         :type models: dictionary of skrl.models.torch.Model
@@ -86,7 +94,7 @@ class MASAC(Agent):
 
         :raises KeyError: If the models dictionary is missing a required key
         """
-        _cfg = copy.deepcopy(MASAC_DEFAULT_CONFIG)
+        _cfg = copy.deepcopy(MATD3_DEFAULT_CONFIG)
         _cfg.update(cfg if cfg is not None else {})
         super().__init__(models=models,
                          memory=memory,
@@ -95,10 +103,11 @@ class MASAC(Agent):
                          device=device,
                          cfg=_cfg)
 
-        self.num_agents = observation_space.shape[0] if len(observation_space.shape)>=2 else 1
+        self.num_agents = observation_space.shape[0] if len(observation_space.shape) >= 2 else 1
 
         # models
         self.policy = self.models.get("policy", None)
+        self.target_policy = self.models.get("target_policy", None)
         self.critic_1 = self.models.get("critic_1", None)
         self.critic_2 = self.models.get("critic_2", None)
         self.target_critic_1 = self.models.get("target_critic_1", None)
@@ -106,17 +115,20 @@ class MASAC(Agent):
 
         # checkpoint models
         self.checkpoint_modules["policy"] = self.policy
+        self.checkpoint_modules["target_policy"] = self.target_policy
         self.checkpoint_modules["critic_1"] = self.critic_1
         self.checkpoint_modules["critic_2"] = self.critic_2
         self.checkpoint_modules["target_critic_1"] = self.target_critic_1
         self.checkpoint_modules["target_critic_2"] = self.target_critic_2
 
-        if self.target_critic_1 is not None and self.target_critic_2 is not None:
+        if self.target_policy is not None and self.target_critic_1 is not None and self.target_critic_2 is not None:
             # freeze target networks with respect to optimizers (update via .update_parameters())
+            self.target_policy.freeze_parameters(True)
             self.target_critic_1.freeze_parameters(True)
             self.target_critic_2.freeze_parameters(True)
 
             # update target networks (hard update)
+            self.target_policy.update_parameters(self.policy, polyak=1)
             self.target_critic_1.update_parameters(self.critic_1, polyak=1)
             self.target_critic_2.update_parameters(self.critic_2, polyak=1)
 
@@ -137,28 +149,22 @@ class MASAC(Agent):
         self._learning_starts = self.cfg["learning_starts"]
 
         self._grad_norm_clip = self.cfg["grad_norm_clip"]
+        self._clamp_magnitude = self.cfg["clamp_magnitude"]
 
-        self._entropy_learning_rate = self.cfg["entropy_learning_rate"]
-        self._learn_entropy = self.cfg["learn_entropy"]
-        self._entropy_coefficient = self.cfg["initial_entropy_value"]
+        self._curiosity = self.cfg["curiosity"]
+
+        self._exploration_noise = self.cfg["exploration"]["noise"]
+        self._exploration_initial_scale = self.cfg["exploration"]["initial_scale"]
+        self._exploration_final_scale = self.cfg["exploration"]["final_scale"]
+        self._exploration_timesteps = self.cfg["exploration"]["timesteps"]
+
+        self._policy_delay = self.cfg["policy_delay"]
+        self._critic_update_counter = 0
+
+        self._smooth_regularization_noise = self.cfg["smooth_regularization_noise"]
+        self._smooth_regularization_clip = self.cfg["smooth_regularization_clip"]
 
         self._rewards_shaper = self.cfg["rewards_shaper"]
-
-        # entropy
-        if self._learn_entropy:
-            self._target_entropy = self.cfg["target_entropy"]
-            if self._target_entropy is None:
-                if issubclass(type(self.action_space), gym.spaces.Box) or issubclass(type(self.action_space), gymnasium.spaces.Box):
-                    self._target_entropy = -np.prod(self.action_space.shape).astype(np.float32)
-                elif issubclass(type(self.action_space), gym.spaces.Discrete) or issubclass(type(self.action_space), gymnasium.spaces.Discrete):
-                    self._target_entropy = -self.action_space.n
-                else:
-                    self._target_entropy = 0
-
-            self.log_entropy_coefficient = torch.log(torch.ones(1, device=self.device) * self._entropy_coefficient).requires_grad_(True)
-            self.entropy_optimizer = torch.optim.Adam([self.log_entropy_coefficient], lr=self._entropy_learning_rate)
-
-            self.checkpoint_modules["entropy_optimizer"] = self.entropy_optimizer
 
         # set up optimizers and learning rate schedulers
         if self.policy is not None and self.critic_1 is not None and self.critic_2 is not None:
@@ -187,10 +193,10 @@ class MASAC(Agent):
 
         # create tensors in memory
         if self.memory is not None:
-            self.memory.create_tensor(name="states", size=self.observation_space.shape, dtype=torch.float32, keep_dimensions=True)
-            self.memory.create_tensor(name="next_states", size=self.observation_space.shape, dtype=torch.float32, keep_dimensions=True)
-            self.memory.create_tensor(name="actions", size=self.action_space.shape, dtype=torch.float32, keep_dimensions=True)
-            self.memory.create_tensor(name="rewards", size=(self.num_agents,1), dtype=torch.float32, keep_dimensions=True)
+            self.memory.create_tensor(name="states", size=self.observation_space, dtype=torch.float32, keep_dimensions=True)
+            self.memory.create_tensor(name="next_states", size=self.observation_space, dtype=torch.float32, keep_dimensions=True)
+            self.memory.create_tensor(name="actions", size=self.action_space, dtype=torch.float32, keep_dimensions=True)
+            self.memory.create_tensor(name="rewards", size=(self.num_agents, 1), dtype=torch.float32, keep_dimensions=True)
             self.memory.create_tensor(name="terminated", size=1, dtype=torch.bool, keep_dimensions=True)
 
             self._tensors_names = ["states", "actions", "rewards", "next_states", "terminated"]
@@ -212,6 +218,9 @@ class MASAC(Agent):
             # default RNN states
             self._rnn_initial_states["policy"].append(torch.zeros(size, dtype=torch.float32, device=self.device))
 
+        # backward compatibility: torch < 1.9 clamp method does not support tensors
+        self._backward_compatibility = tuple(map(int, (torch.__version__.split(".")[:2]))) < (1, 9)
+
     def act(self, states: torch.Tensor, timestep: int, timesteps: int) -> torch.Tensor:
         """Process the environment's states to make a decision (actions) using the main policy
 
@@ -231,11 +240,43 @@ class MASAC(Agent):
         if timestep < self._random_timesteps:
             return self.policy.random_act({"states": self._state_preprocessor(states), **rnn}, role="policy")
 
-        # sample stochastic actions
+        # sample deterministic actions
         actions, _, outputs = self.policy.act({"states": self._state_preprocessor(states), **rnn}, role="policy")
 
         if self._rnn:
             self._rnn_final_states["policy"] = outputs.get("rnn", [])
+
+        # add exloration noise
+        if self._exploration_noise is not None:
+            # sample noises
+            noises = self._exploration_noise.sample(actions.shape)
+
+            # define exploration timesteps
+            scale = self._exploration_final_scale
+            if self._exploration_timesteps is None:
+                self._exploration_timesteps = timesteps
+
+            # apply exploration noise
+            if timestep <= self._exploration_timesteps:
+                scale = (1 - timestep / self._exploration_timesteps) \
+                      * (self._exploration_initial_scale - self._exploration_final_scale) \
+                      + self._exploration_final_scale
+                noises.mul_(scale)
+
+                # modify actions
+                actions.add_(noises)
+                actions = self.transform_actions(actions)
+
+                # record noises
+                self.track_data("Exploration / Exploration noise (max)", torch.max(noises).item())
+                self.track_data("Exploration / Exploration noise (min)", torch.min(noises).item())
+                self.track_data("Exploration / Exploration noise (mean)", torch.mean(noises).item())
+
+            else:
+                # record noises
+                self.track_data("Exploration / Exploration noise (max)", 0)
+                self.track_data("Exploration / Exploration noise (min)", 0)
+                self.track_data("Exploration / Exploration noise (mean)", 0)
 
         return actions, None, outputs
 
@@ -289,7 +330,7 @@ class MASAC(Agent):
                 memory.add_samples(states=states, actions=actions, rewards=rewards, next_states=next_states,
                                    terminated=terminated, truncated=truncated, **rnn_states)
 
-         # update RNN states
+        # update RNN states
         if self._rnn:
             # reset states if the episodes have ended
             finished_episodes = terminated.nonzero(as_tuple=False)
@@ -342,26 +383,37 @@ class MASAC(Agent):
             sampled_rnn = self.memory.sample_by_index(names=self._rnn_tensors_names, indexes=self.memory.get_sampling_indexes())[0]
             rnn_policy = {"rnn": [s.transpose(0, 1) for s in sampled_rnn], "terminated": sampled_dones}
 
+        if self._curiosity is not None:
+            curiosity_reward = self._curiosity.reward(sampled_states, sampled_actions)
+            sampled_rewards += curiosity_reward
+
         # gradient steps
         for gradient_step in range(self._gradient_steps):
 
             sampled_states = self._state_preprocessor(sampled_states, train=not gradient_step)
             sampled_next_states = self._state_preprocessor(sampled_next_states)
 
-            # compute target values
             with torch.no_grad():
-                next_actions, next_log_prob, _ = self.policy.act({"states": sampled_next_states, **rnn_policy}, role="policy")
+                # target policy smoothing
+                next_actions, _, _ = self.target_policy.act({"states": sampled_next_states, **rnn_policy}, role="target_policy")
+                noises = torch.clamp(self._smooth_regularization_noise.sample(next_actions.shape),
+                                     min=-self._smooth_regularization_clip,
+                                     max=self._smooth_regularization_clip)
 
+                next_actions.add_(noises)
+                next_actions = self.transform_actions(next_actions)
+
+                # compute target values
                 target_q1_values, _, _ = self.target_critic_1.act({"states": sampled_next_states, "taken_actions": next_actions, **rnn_policy}, role="target_critic_1")
                 target_q2_values, _, _ = self.target_critic_2.act({"states": sampled_next_states, "taken_actions": next_actions, **rnn_policy}, role="target_critic_2")
-                target_q_values = torch.min(target_q1_values, target_q2_values) - self._entropy_coefficient * next_log_prob
+                target_q_values = torch.min(target_q1_values, target_q2_values)
                 target_values = sampled_rewards + self._discount_factor * sampled_dones.logical_not().unsqueeze(1) * target_q_values
 
             # compute critic loss
             critic_1_values, _, _ = self.critic_1.act({"states": sampled_states, "taken_actions": sampled_actions, **rnn_policy}, role="critic_1")
             critic_2_values, _, _ = self.critic_2.act({"states": sampled_states, "taken_actions": sampled_actions, **rnn_policy}, role="critic_2")
 
-            critic_loss = (F.mse_loss(critic_1_values, target_values) + F.mse_loss(critic_2_values, target_values)) / 2
+            critic_loss = F.mse_loss(critic_1_values, target_values) + F.mse_loss(critic_2_values, target_values)
 
             # optimization step (critic)
             self.critic_optimizer.zero_grad()
@@ -370,36 +422,28 @@ class MASAC(Agent):
                 nn.utils.clip_grad_norm_(itertools.chain(self.critic_1.parameters(), self.critic_2.parameters()), self._grad_norm_clip)
             self.critic_optimizer.step()
 
-            # compute policy (actor) loss
-            actions, log_prob, _ = self.policy.act({"states": sampled_states, **rnn_policy}, role="policy")
-            critic_1_values, _, _ = self.critic_1.act({"states": sampled_states, "taken_actions": actions, **rnn_policy}, role="critic_1")
-            critic_2_values, _, _ = self.critic_2.act({"states": sampled_states, "taken_actions": actions, **rnn_policy}, role="critic_2")
+            # delayed update
+            self._critic_update_counter += 1
+            if not self._critic_update_counter % self._policy_delay:
 
-            policy_loss = (self._entropy_coefficient * log_prob - torch.min(critic_1_values, critic_2_values)).mean()
+                # compute policy (actor) loss
+                actions, _, _ = self.policy.act({"states": sampled_states, **rnn_policy}, role="policy")
+                actions = self.transform_actions(actions)
+                critic_values, _, _ = self.critic_1.act({"states": sampled_states, "taken_actions": actions, **rnn_policy}, role="critic_1")
 
-            # optimization step (policy)
-            self.policy_optimizer.zero_grad()
-            policy_loss.backward()
-            if self._grad_norm_clip > 0:
-                nn.utils.clip_grad_norm_(self.policy.parameters(), self._grad_norm_clip)
-            self.policy_optimizer.step()
+                policy_loss = -critic_values.mean()
 
-            # entropy learning
-            if self._learn_entropy:
-                # compute entropy loss
-                entropy_loss = -(self.log_entropy_coefficient * (log_prob + self._target_entropy).detach()).mean()
+                # optimization step (policy)
+                self.policy_optimizer.zero_grad()
+                policy_loss.backward()
+                if self._grad_norm_clip > 0:
+                    nn.utils.clip_grad_norm_(self.policy.parameters(), self._grad_norm_clip)
+                self.policy_optimizer.step()
 
-                # optimization step (entropy)
-                self.entropy_optimizer.zero_grad()
-                entropy_loss.backward()
-                self.entropy_optimizer.step()
-
-                # compute entropy coefficient
-                self._entropy_coefficient = torch.exp(self.log_entropy_coefficient.detach())
-
-            # update target networks
-            self.target_critic_1.update_parameters(self.critic_1, polyak=self._polyak)
-            self.target_critic_2.update_parameters(self.critic_2, polyak=self._polyak)
+                # update target networks
+                self.target_critic_1.update_parameters(self.critic_1, polyak=self._polyak)
+                self.target_critic_2.update_parameters(self.critic_2, polyak=self._polyak)
+                self.target_policy.update_parameters(self.policy, polyak=self._polyak)
 
             # update learning rate
             if self._learning_rate_scheduler:
@@ -407,31 +451,25 @@ class MASAC(Agent):
                 self.critic_scheduler.step()
 
             # record data
-            if self.write_interval > 0:
+            if not self._critic_update_counter % self._policy_delay:
                 self.track_data("Loss / Policy loss", policy_loss.item())
-                self.track_data("Loss / Critic loss", critic_loss.item())
+            self.track_data("Loss / Critic loss", critic_loss.item())
 
-                self.track_data("Q-network / Q1 (max)", torch.max(critic_1_values).item())
-                self.track_data("Q-network / Q1 (min)", torch.min(critic_1_values).item())
-                self.track_data("Q-network / Q1 (mean)", torch.mean(critic_1_values).item())
+            self.track_data("Q-network / Q1 (max)", torch.max(critic_1_values).item())
+            self.track_data("Q-network / Q1 (min)", torch.min(critic_1_values).item())
+            self.track_data("Q-network / Q1 (mean)", torch.mean(critic_1_values).item())
 
-                self.track_data("Q-network / Q2 (max)", torch.max(critic_2_values).item())
-                self.track_data("Q-network / Q2 (min)", torch.min(critic_2_values).item())
-                self.track_data("Q-network / Q2 (mean)", torch.mean(critic_2_values).item())
+            self.track_data("Q-network / Q2 (max)", torch.max(critic_2_values).item())
+            self.track_data("Q-network / Q2 (min)", torch.min(critic_2_values).item())
+            self.track_data("Q-network / Q2 (mean)", torch.mean(critic_2_values).item())
 
-                self.track_data("Target / Target (max)", torch.max(target_values).item())
-                self.track_data("Target / Target (min)", torch.min(target_values).item())
-                self.track_data("Target / Target (mean)", torch.mean(target_values).item())
+            self.track_data("Target / Target (max)", torch.max(target_values).item())
+            self.track_data("Target / Target (min)", torch.min(target_values).item())
+            self.track_data("Target / Target (mean)", torch.mean(target_values).item())
 
-                if self._learn_entropy:
-                    self.track_data("Loss / Entropy loss", entropy_loss.item())
-                    self.track_data("Coefficient / Entropy coefficient", self._entropy_coefficient.item())
+            if self._learning_rate_scheduler:
+                self.track_data("Learning / Policy learning rate", self.policy_scheduler.get_last_lr()[0])
+                self.track_data("Learning / Critic learning rate", self.critic_scheduler.get_last_lr()[0])
 
-                if self._learning_rate_scheduler:
-                    self.track_data("Learning / Policy learning rate", self.policy_scheduler.get_last_lr()[0])
-                    self.track_data("Learning / Critic learning rate", self.critic_scheduler.get_last_lr()[0])
-
-                self.track_data("Actions x", actions[:2, 0, 0].detach().cpu())
-                self.track_data("Actions y", actions[:2, 0, 1].detach().cpu())
-                self.track_data("Actor mu", torch.mean(self.policy.mu).item())
-                self.track_data("Actor sigma", torch.exp(torch.mean(self.policy.log_std_parameter)).item())
+            self.track_data("Actions x", next_actions[0, :, 0].detach().cpu())
+            self.track_data("Actions y", next_actions[0, :, 1].detach().cpu())

@@ -14,7 +14,8 @@ class Model(torch.nn.Module):
     def __init__(self,
                  observation_space: Union[int, Sequence[int], gym.Space, gymnasium.Space],
                  action_space: Union[int, Sequence[int], gym.Space, gymnasium.Space],
-                 device: Optional[Union[str, torch.device]] = None) -> None:
+                 device: Optional[Union[str, torch.device]] = None,
+                 random_distribution: Optional[torch.distributions.Distribution] = None) -> None:
         """Base class representing a function approximator
 
         The following properties are defined:
@@ -61,7 +62,7 @@ class Model(torch.nn.Module):
         self.num_observations = None if observation_space is None else self._get_space_size(observation_space)
         self.num_actions = None if action_space is None else self._get_space_size(action_space)
 
-        self._random_distribution = None
+        self._random_distribution = random_distribution
 
     def _get_space_size(self,
                         space: Union[int, Sequence[int], gym.Space, gymnasium.Space],
@@ -243,10 +244,10 @@ class Model(torch.nn.Module):
         elif issubclass(type(self.action_space), gym.spaces.Box) or issubclass(type(self.action_space), gymnasium.spaces.Box):
             if self._random_distribution is None:
                 self._random_distribution = torch.distributions.uniform.Uniform(
-                    low=torch.tensor(self.action_space.low[0], device=self.device, dtype=torch.float32),
-                    high=torch.tensor(self.action_space.high[0], device=self.device, dtype=torch.float32))
-
-            return self._random_distribution.sample(sample_shape=(inputs["states"].shape[0], self.num_actions)), None, {}
+                    low=torch.tensor(self.action_space.low, device=self.device, dtype=torch.float32),
+                    high=torch.tensor(self.action_space.high, device=self.device, dtype=torch.float32))
+            actions = self._random_distribution.sample(sample_shape=(inputs["states"].shape[0],))
+            return actions, None, {}
         else:
             raise NotImplementedError("Action space type ({}) not supported".format(type(self.action_space)))
 
